@@ -1,16 +1,17 @@
+use std::env;
+use std::sync::Arc;
+
 use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::get,
 };
 use chrono::NaiveDate;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::env;
 
 // --- СТРУКТУРЫ ДАННЫХ ---
 
@@ -20,40 +21,34 @@ pub struct PeriodParams {
     pub end: NaiveDate,
 }
 
-// 1. Название поставщика по ИНН
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct SupplierName {
     pub name: String,
 }
 
-// 2. Поставщики, обслуживаемые одним банком
 #[derive(Debug, Serialize)]
 pub struct SupplierBankInfo {
     pub name: String,
     pub tax_id: Option<String>,
 }
 
-// 3. Количество поставщиков, обслуживаемых каждым банком
 #[derive(Debug, Serialize)]
 pub struct BankSupplierCount {
     pub bank_address_city: Option<String>,
-    pub supplier_count: Option<i64>, // SQL count может вернуть None в редких случаях или если GROUP BY сложный, лучше Option
+    pub supplier_count: Option<i64>,
 }
 
-// 4. Ассортимент в заданной группе материалов
 #[derive(Debug, Serialize)]
 pub struct MaterialAssortment {
     pub material_name: String,
     pub class_code: Option<String>,
 }
 
-// 5. Сумма денег, прошедших через банки за период
 #[derive(Debug, Serialize)]
 pub struct TotalAmount {
     pub total_amount: Option<f64>,
 }
 
-// 7. Количество каждого материала на складе и его суммарная стоимость
 #[derive(Debug, Serialize)]
 pub struct InventoryValue {
     pub material_name: String,
@@ -61,111 +56,83 @@ pub struct InventoryValue {
     pub total_value: Option<f64>,
 }
 
-// 8. Доля поставщика в поставке товаров одной группы
 #[derive(Debug, Serialize)]
 pub struct SupplierShare {
     pub supplier_share: Option<f64>,
 }
 
-// 9. Загруженность склада по месяцам одного года
-#[derive(Debug, Serialize)]
-pub struct MonthlyLoad {
-    pub month: Option<f64>, // EXTRACT возвращает float
-    pub monthly_value: Option<f64>,
-}
-
-// 10. Банк и сумма по ордеру
 #[derive(Debug, Serialize)]
 pub struct OrderBankInfo {
     pub bank_address_city: Option<String>,
     pub total_amount: Option<f64>,
 }
 
-// --- ОБРАБОТКА ОШИБОК (ANYHOW + JSON) ---
+// --- СОСТОЯНИЕ (State) ---
 
-// Обертка для ошибок, чтобы реализовать IntoResponse
-pub struct AppError(anyhow::Error);
-
-// Позволяет использовать оператор `?` для приведения любых ошибок к AppError
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
-        Self(err.into())
-    }
+pub struct AppState {
+    pub pool: PgPool,
+    // Кэш: ИНН -> Имя. DashMap обеспечивает потокобезопасность
+    pub supplier_cache: DashMap<String, String>,
 }
-
-// Логика превращения ошибки в HTTP ответ (JSON)
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self.0.downcast_ref::<sqlx::Error>() {
-            Some(sqlx::Error::RowNotFound) => {
-                (StatusCode::NOT_FOUND, "Resource not found".to_string())
-            }
-            Some(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Database error".to_string(),
-            ),
-            None => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                self.0.to_string(), // Возвращаем текст ошибки anyhow (будь осторожен с чувствительными данными в проде)
-            ),
-        };
-
-        let body = Json(json!({
-            "status": "error",
-            "message": error_message
-        }));
-
-        (status, body).into_response()
-    }
-}
-
-// Тип ответа хендлеров: Успех (JSON) или Ошибка (AppError -> JSON)
-type HandlerResult<T> = Result<Json<T>, AppError>;
 
 // --- ХЕНДЛЕРЫ ---
+// Теперь каждый хендлер возвращает: Result<Json<T>, (StatusCode, String)>
+// В случае успеха: JSON. В случае ошибки: Статус + Текст ошибки.
 
 // 1. GET /api/suppliers/by-tax/:tax_id
 pub async fn get_supplier_name_by_tax(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Path(tax_id): Path<String>,
-) -> HandlerResult<SupplierName> {
+) -> Result<Json<SupplierName>, (StatusCode, String)> {
+    // 1. Проверяем кэш
+    if let Some(name) = state.supplier_cache.get(&tax_id) {
+        return Ok(Json(SupplierName { name: name.clone() }));
+    }
+
+    // 2. Идем в БД
     let result = sqlx::query_as!(
         SupplierName,
         "SELECT name FROM Suppliers WHERE tax_id = $1",
         tax_id
     )
-    .fetch_optional(&pool)
-    .await?; // Используем ? благодаря AppError
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?; // Конвертируем ошибку БД вручную
 
     match result {
-        Some(supplier) => Ok(Json(supplier)),
-        None => Err(anyhow::anyhow!("Поставщик с ИНН {} не найден", tax_id).into()),
+        Some(supplier) => {
+            // 3. Сохраняем в кэш
+            state.supplier_cache.insert(tax_id, supplier.name.clone());
+            Ok(Json(supplier))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("Поставщик с ИНН {} не найден", tax_id),
+        )),
     }
 }
 
 // 2. GET /api/suppliers/by-bank-city/:city
 pub async fn get_suppliers_by_bank_city(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Path(city): Path<String>,
-) -> HandlerResult<Vec<SupplierBankInfo>> {
+) -> Result<Json<Vec<SupplierBankInfo>>, (StatusCode, String)> {
     let suppliers = sqlx::query_as!(
         SupplierBankInfo,
         "SELECT name, tax_id FROM Suppliers WHERE bank_address_city = $1",
         city
     )
-    .fetch_all(&pool)
-    .await?;
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(suppliers))
 }
 
 // 3. GET /api/analytics/bank-supplier-count
 pub async fn get_suppliers_per_bank(
-    State(pool): State<PgPool>,
-) -> HandlerResult<Vec<BankSupplierCount>> {
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<BankSupplierCount>>, (StatusCode, String)> {
     let counts = sqlx::query_as!(
         BankSupplierCount,
         r#"
@@ -178,33 +145,35 @@ pub async fn get_suppliers_per_bank(
         ORDER BY "supplier_count" DESC
         "#
     )
-    .fetch_all(&pool)
-    .await?;
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(counts))
 }
 
 // 4. GET /api/materials/by-group/:group_code
 pub async fn get_materials_by_group(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Path(group_code): Path<String>,
-) -> HandlerResult<Vec<MaterialAssortment>> {
+) -> Result<Json<Vec<MaterialAssortment>>, (StatusCode, String)> {
     let assortment = sqlx::query_as!(
         MaterialAssortment,
         "SELECT material_name, class_code FROM Material_Catalog WHERE group_code = $1",
         group_code
     )
-    .fetch_all(&pool)
-    .await?;
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(assortment))
 }
 
 // 5. GET /api/finance/total-spent?start=...&end=...
 pub async fn get_total_spent_by_period(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Query(params): Query<PeriodParams>,
-) -> HandlerResult<TotalAmount> {
+) -> Result<Json<TotalAmount>, (StatusCode, String)> {
     let result = sqlx::query_as!(
         TotalAmount,
         r#"
@@ -215,31 +184,26 @@ pub async fn get_total_spent_by_period(
         params.start,
         params.end
     )
-    .fetch_one(&pool)
-    .await?;
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(result))
 }
 
-// 6. GET /api/inventory/withdrawn (Заглушка)
-pub async fn get_withdrawn_materials(
-    _state: State<PgPool>,
-    _query: Query<PeriodParams>,
-) -> HandlerResult<Vec<String>> {
-    // Явно создаем ошибку, которая превратится в JSON
-    // Т.к. это NotImplemented, можно было бы сделать кастомный статус,
-    // но для примера вернем 500 через anyhow или кастомную логику.
-
-    // Для более красивого кода лучше использовать (StatusCode, Json) напрямую,
-    // но требование было "через anyhow" или единообразно.
-    // Сделаем так:
-    Err(anyhow::anyhow!("Метод не реализован: отсутствует таблица расхода").into())
+// 6. GET /api/inventory/withdrawn
+pub async fn get_withdrawn_materials() -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    // Просто возвращаем код 501
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "Метод еще не реализован".to_string(),
+    ))
 }
 
 // 7. GET /api/inventory/stock-value
 pub async fn get_current_inventory_value(
-    State(pool): State<PgPool>,
-) -> HandlerResult<Vec<InventoryValue>> {
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<InventoryValue>>, (StatusCode, String)> {
     let inventory = sqlx::query_as!(
         InventoryValue,
         r#"
@@ -253,17 +217,18 @@ pub async fn get_current_inventory_value(
         ORDER BY total_value DESC
         "#,
     )
-    .fetch_all(&pool)
-    .await?;
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(inventory))
 }
 
 // 8. GET /api/analytics/supplier-share/:supplier_id/:group_code
 pub async fn get_supplier_share(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Path((supplier_id, group_code)): Path<(i32, String)>,
-) -> HandlerResult<SupplierShare> {
+) -> Result<Json<SupplierShare>, (StatusCode, String)> {
     let share = sqlx::query_as!(
         SupplierShare,
         r#"
@@ -284,41 +249,18 @@ pub async fn get_supplier_share(
         supplier_id,
         group_code
     )
-    .fetch_one(&pool)
-    .await?;
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(share))
 }
 
-// 9. GET /api/inventory/monthly-load/:year
-// pub async fn get_monthly_load(
-//    State(pool): State<PgPool>,
-//    Path(year): Path<i32>,
-//) -> HandlerResult<Vec<MonthlyLoad>> {
-//    let load = sqlx::query_as!(
-//        MonthlyLoad,
-//        r#"
-//        SELECT
-//            EXTRACT(MONTH FROM date) AS month,
-//            SUM(quantity * unit_price)::float AS monthly_value
-//        FROM Storage_Units
-//        WHERE EXTRACT(YEAR FROM date) = $1
-//       GROUP BY month
-//        ORDER BY month
-//        "#,
-//        year
-//    )
-//    .fetch_all(&pool)
-//    .await?;
-//
-//    Ok(Json(load))
-//}
-
 // 10. GET /api/orders/:order_number/bank-info
 pub async fn get_bank_info_by_order(
-    State(pool): State<PgPool>,
+    State(state): State<Arc<AppState>>,
     Path(order_number): Path<i32>,
-) -> HandlerResult<OrderBankInfo> {
+) -> Result<Json<OrderBankInfo>, (StatusCode, String)> {
     let info = sqlx::query_as!(
         OrderBankInfo,
         r#"
@@ -331,12 +273,16 @@ pub async fn get_bank_info_by_order(
         "#,
         order_number
     )
-    .fetch_optional(&pool)
-    .await?;
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match info {
         Some(i) => Ok(Json(i)),
-        None => Err(anyhow::anyhow!("Ордер с номером {} не найден", order_number).into()),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("Ордер {} не найден", order_number),
+        )),
     }
 }
 
@@ -357,49 +303,44 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Успешное подключение к БД");
 
+    // Инициализируем состояние с пулом и пустым DashMap
+    let app_state = Arc::new(AppState {
+        pool,
+        supplier_cache: DashMap::new(),
+    });
+
     let app = Router::new()
-        // 1. ИСПРАВЛЕНО: {tax_id}
         .route(
             "/api/suppliers/by-tax/{tax_id}",
             get(get_supplier_name_by_tax),
         )
-        // 2. ИСПРАВЛЕНО: {city}
         .route(
             "/api/suppliers/by-bank-city/{city}",
             get(get_suppliers_by_bank_city),
         )
-        // 3
         .route(
             "/api/analytics/bank-supplier-count",
             get(get_suppliers_per_bank),
         )
-        // 4. ИСПРАВЛЕНО: {group_code}
         .route(
             "/api/materials/by-group/{group_code}",
             get(get_materials_by_group),
         )
-        // 5
         .route("/api/finance/total-spent", get(get_total_spent_by_period))
-        // 6 (Заглушка)
         .route("/api/inventory/withdrawn", get(get_withdrawn_materials))
-        // 7
         .route(
             "/api/inventory/stock-value",
             get(get_current_inventory_value),
         )
-        // 8. ИСПРАВЛЕНО: {supplier_id} и {group_code}
         .route(
             "/api/analytics/supplier-share/{supplier_id}/{group_code}",
             get(get_supplier_share),
         )
-        // 9. ИСПРАВЛЕНО: {year}
-        //        .route("/api/inventory/monthly-load/{year}", get(get_monthly_load))
-        // 10. ИСПРАВЛЕНО: {order_number}
         .route(
             "/api/orders/{order_number}/bank-info",
             get(get_bank_info_by_order),
         )
-        .with_state(pool);
+        .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     println!("Server running on http://0.0.0.0:3000");

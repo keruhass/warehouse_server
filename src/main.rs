@@ -13,8 +13,6 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
-// --- СТРУКТУРЫ ДАННЫХ ---
-
 #[derive(Debug, Deserialize)]
 pub struct PeriodParams {
     pub start: NaiveDate,
@@ -67,29 +65,20 @@ pub struct OrderBankInfo {
     pub total_amount: Option<f64>,
 }
 
-// --- СОСТОЯНИЕ (State) ---
-
 pub struct AppState {
     pub pool: PgPool,
-    // Кэш: ИНН -> Имя. DashMap обеспечивает потокобезопасность
     pub supplier_cache: DashMap<String, String>,
 }
-
-// --- ХЕНДЛЕРЫ ---
-// Теперь каждый хендлер возвращает: Result<Json<T>, (StatusCode, String)>
-// В случае успеха: JSON. В случае ошибки: Статус + Текст ошибки.
 
 // 1. GET /api/suppliers/by-tax/:tax_id
 pub async fn get_supplier_name_by_tax(
     State(state): State<Arc<AppState>>,
     Path(tax_id): Path<String>,
 ) -> Result<Json<SupplierName>, (StatusCode, String)> {
-    // 1. Проверяем кэш
     if let Some(name) = state.supplier_cache.get(&tax_id) {
         return Ok(Json(SupplierName { name: name.clone() }));
     }
 
-    // 2. Идем в БД
     let result = sqlx::query_as!(
         SupplierName,
         "SELECT name FROM Suppliers WHERE tax_id = $1",
@@ -97,11 +86,10 @@ pub async fn get_supplier_name_by_tax(
     )
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?; // Конвертируем ошибку БД вручную
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match result {
         Some(supplier) => {
-            // 3. Сохраняем в кэш
             state.supplier_cache.insert(tax_id, supplier.name.clone());
             Ok(Json(supplier))
         }
@@ -193,7 +181,6 @@ pub async fn get_total_spent_by_period(
 
 // 6. GET /api/inventory/withdrawn
 pub async fn get_withdrawn_materials() -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    // Просто возвращаем код 501
     Err((
         StatusCode::NOT_IMPLEMENTED,
         "Метод еще не реализован".to_string(),
@@ -286,8 +273,6 @@ pub async fn get_bank_info_by_order(
     }
 }
 
-// --- MAIN ---
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
@@ -301,9 +286,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Couldn't connect to database")?;
 
-    println!("Успешное подключение к БД");
+    println!("Database connection success");
 
-    // Инициализируем состояние с пулом и пустым DashMap
     let app_state = Arc::new(AppState {
         pool,
         supplier_cache: DashMap::new(),

@@ -7,6 +7,22 @@ use axum::{
 };
 
 use crate::{dto::suppliers::SupplierName, state::AppState};
+
+pub async fn get_suppliers(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SupplierName>>, (StatusCode, String)> {
+    let result = sqlx::query_as!(SupplierName, "SELECT supplier_name FROM suppliers",)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.is_empty() {
+        Err((StatusCode::NOT_FOUND, "Поставщики не найдены.".to_string()))
+    } else {
+        Ok(Json(result))
+    }
+}
+
 pub async fn get_supplier_by_inn(
     State(state): State<Arc<AppState>>,
     Path(inn_id): Path<String>,

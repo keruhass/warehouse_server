@@ -5,10 +5,12 @@ use axum::Router;
 use crate::state::AppState;
 
 pub mod banks;
+pub mod material_groups;
 pub mod suppliers;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .merge(suppliers::router())
         .merge(banks::router())
+        .merge(material_groups::router())
 }

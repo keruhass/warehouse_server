@@ -6,7 +6,11 @@ use axum::{
     Json,
 };
 
-use crate::{dto::suppliers::SupplierName, state::AppState};
+use crate::{
+    dto::suppliers::{SupplierName, SupplierShare},
+    errors::api::ApiError,
+    state::AppState,
+};
 
 pub async fn get_suppliers(
     State(state): State<Arc<AppState>>,
@@ -79,6 +83,53 @@ pub async fn get_suppliers_by_bank(
         Err((
             StatusCode::NOT_FOUND,
             format!("Поставщики с банком {} не были найдены.", bank_id),
+        ))
+    } else {
+        Ok(Json(result))
+    }
+}
+pub async fn get_suppliers_share(
+    State(state): State<Arc<AppState>>,
+    Path(group_name): Path<String>,
+) -> Result<Json<Vec<SupplierShare>>, ApiError> {
+    let result = sqlx::query_as!(
+        SupplierShare,
+        "SELECT
+            s.supplier_name,
+            SUM(wm.quantity) AS supplier_quantity,
+
+            SUM(wm.quantity) * 1.0 
+            / SUM(SUM(wm.quantity)) OVER () AS supplier_share
+
+        FROM warehouse_movements wm
+
+        JOIN movement_types mt 
+            ON wm.movement_type_id = mt.movement_type_id
+
+        JOIN suppliers s 
+            ON wm.supplier_id = s.supplier_id
+
+        JOIN materials m 
+            ON wm.material_id = m.material_id
+
+        JOIN material_groups mg 
+            ON m.group_id = mg.group_id
+
+        WHERE mt.movement_type_name = 'IN'
+        AND mg.group_name = $1   -- параметр: название группы
+
+        GROUP BY s.supplier_name
+
+        ORDER BY supplier_share DESC;",
+        group_name,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    if result.is_empty() {
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Поставщики не были найдены".to_string(),
         ))
     } else {
         Ok(Json(result))

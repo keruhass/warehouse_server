@@ -6,6 +6,7 @@ use crate::state::AppState;
 
 pub mod banks;
 pub mod material_groups;
+pub mod materials;
 pub mod service;
 pub mod suppliers;
 
@@ -15,4 +16,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(banks::router())
         .merge(material_groups::router())
         .merge(service::router())
+        .merge(materials::router())
 }

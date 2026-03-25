@@ -1,15 +1,15 @@
-use std::sync::Arc;
-
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
+use std::str::FromStr;
+use std::sync::Arc;
 
-use crate::errors::api::ApiError;
 use crate::{dto::service::AmountOfMoneyPerBank, state::AppState};
+use crate::{dto::service::MonthTurnover, errors::api::ApiError};
 
 #[axum::debug_handler]
 pub async fn get_amount_of_money_per_bank(
@@ -50,6 +50,47 @@ pub async fn get_amount_of_money_per_bank(
         Err(ApiError(
             StatusCode::NOT_FOUND,
             "Банки не были найдены".to_string(),
+        ))
+    } else {
+        Ok(Json(result))
+    }
+}
+pub async fn get_year_turnover(
+    State(state): State<Arc<AppState>>,
+    Path(request): Path<String>,
+) -> Result<Json<Vec<MonthTurnover>>, ApiError> {
+    let year = Decimal::from_str(&request).unwrap_or(Decimal::ZERO);
+    let result = sqlx::query_as!(
+        MonthTurnover,
+        "SELECT
+            EXTRACT(MONTH FROM wm.movement_date)::INT AS month,
+
+            SUM(
+                CASE
+                    WHEN mt.movement_type_name = 'IN' THEN wm.quantity
+                    ELSE wm.quantity
+                END
+            ) AS total_turnover
+
+        FROM warehouse_movements wm
+
+        JOIN movement_types mt 
+            ON wm.movement_type_id = mt.movement_type_id
+
+        WHERE EXTRACT(YEAR FROM wm.movement_date) = $1
+
+        GROUP BY month
+
+        ORDER BY month;",
+        year,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    if result.is_empty() {
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Информация о загруженности календарного года не была найдена".to_string(),
         ))
     } else {
         Ok(Json(result))

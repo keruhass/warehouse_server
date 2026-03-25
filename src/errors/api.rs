@@ -5,7 +5,6 @@ use axum::{
 };
 use chrono::ParseError;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ApiError(pub StatusCode, pub String);
 

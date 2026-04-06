@@ -7,11 +7,31 @@ use axum::{
 };
 
 use crate::{
-    dto::suppliers::{SupplierName, SupplierShare},
+    dto::suppliers::{Supplier, SupplierName, SupplierShare},
     errors::api::ApiError,
     state::AppState,
 };
 
+pub async fn get_supplier_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(supplier_id): Path<i32>,
+) -> Result<Json<Supplier>, ApiError> {
+    let result = sqlx::query_as!(
+        Supplier,
+        "SELECT * FROM suppliers WHERE supplier_id = $1",
+        supplier_id
+    )
+    .fetch_optional(&state.db)
+    .await?;
+
+    match result {
+        Some(supplier) => Ok(Json(supplier)),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Поставщик с указанным id не был найден".to_string(),
+        )),
+    }
+}
 pub async fn get_suppliers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<SupplierName>>, (StatusCode, String)> {
@@ -135,3 +155,5 @@ pub async fn get_suppliers_share(
         Ok(Json(result))
     }
 }
+
+// pub async fn update_supplier_inn()

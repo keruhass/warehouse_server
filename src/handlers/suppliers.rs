@@ -156,4 +156,23 @@ pub async fn get_suppliers_share(
     }
 }
 
-// pub async fn update_supplier_inn()
+pub async fn update_inn(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE suppliers
+        SET inn =
+            CONCAT(
+                ((SUBSTRING(inn FROM 1 FOR 1)::INT + 1) % 10),
+                ((SUBSTRING(inn FROM 2 FOR 1)::INT + 1) % 10),
+                ((SUBSTRING(inn FROM 3 FOR 1)::INT + 1) % 10),
+                SUBSTRING(inn FROM 4)
+            ) 
+        "#
+    )
+    .execute(&state.db)
+    .await?;
+
+    println!("Updated rows: {}", result.rows_affected());
+
+    Ok(StatusCode::NO_CONTENT)
+}

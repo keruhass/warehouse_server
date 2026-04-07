@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
 
+use crate::errors::api::ApiError;
 use crate::{dto::banks::BanksSuppliersCount, state::AppState};
 
 pub async fn get_suppliers_per_bank(
@@ -27,4 +28,24 @@ pub async fn get_suppliers_per_bank(
     } else {
         Ok(Json(result))
     }
+}
+
+pub async fn delete_bank(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
+    let result = sqlx::query!(
+        r#"
+        DELETE FROM banks
+        WHERE bank_id = (
+            SELECT b.bank_id
+            FROM banks b
+            JOIN suppliers s ON s.bank_id = b.bank_id
+            GROUP BY b.bank_id
+            ORDER BY COUNT(s.supplier_id) DESC
+            LIMIT 1
+        );
+        "#
+    )
+    .execute(&state.db)
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

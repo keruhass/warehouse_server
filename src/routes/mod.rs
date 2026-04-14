@@ -5,6 +5,7 @@ use axum::Router;
 use crate::state::AppState;
 
 pub mod banks;
+pub mod document_types;
 pub mod material_groups;
 pub mod materials;
 pub mod orders;
@@ -19,4 +20,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(service::router())
         .merge(materials::router())
         .merge(orders::router())
+        .merge(document_types::router())
 }

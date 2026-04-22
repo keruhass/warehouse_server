@@ -3,7 +3,10 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, Json};
 
 use crate::errors::api::ApiError;
-use crate::{dto::banks::BanksSuppliersCount, state::AppState};
+use crate::{
+    dto::banks::{BanksSuppliersCount, CreateBank},
+    state::AppState,
+};
 
 pub async fn get_suppliers_per_bank(
     State(state): State<Arc<AppState>>,
@@ -48,4 +51,34 @@ pub async fn delete_bank(State(state): State<Arc<AppState>>) -> Result<StatusCod
     .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn post_bank(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateBank>,
+) -> Result<StatusCode, ApiError> {
+    if payload.bank_name.trim().is_empty()
+        || payload.post_index.trim().is_empty()
+        || payload.city.trim().is_empty()
+        || payload.street.trim().is_empty()
+        || payload.house.trim().is_empty()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Все поля банка должны быть непустыми".to_string(),
+        ));
+    }
+
+    sqlx::query(
+        "INSERT INTO banks (bank_name, post_index, city, street, house) VALUES ($1, $2, $3, $4, $5)",
+    )
+        .bind(payload.bank_name)
+        .bind(payload.post_index)
+        .bind(payload.city)
+        .bind(payload.street)
+        .bind(payload.house)
+        .execute(&state.db)
+        .await?;
+
+    Ok(StatusCode::CREATED)
 }

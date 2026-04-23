@@ -10,7 +10,7 @@ use chrono::NaiveDate;
 
 use crate::errors::api::ApiError;
 use crate::{
-    dto::materials::{MaterialQuantity, MaterialQuantityAndTotalSum},
+    dto::materials::{CreateMaterial, MaterialQuantity, MaterialQuantityAndTotalSum},
     state::AppState,
 };
 
@@ -103,4 +103,24 @@ pub async fn get_quantity_and_sum_of_materials(
     } else {
         Ok(Json(result))
     }
+}
+
+pub async fn post_material(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateMaterial>,
+) -> Result<StatusCode, ApiError> {
+    if payload.material_name.trim().is_empty() || payload.group_id <= 0 {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Имя материала должно быть непустым, а group_id должен быть положительным".to_string(),
+        ));
+    }
+
+    sqlx::query("INSERT INTO materials (material_name, group_id) VALUES ($1, $2)")
+        .bind(payload.material_name)
+        .bind(payload.group_id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(StatusCode::CREATED)
 }

@@ -36,15 +36,16 @@ pub async fn get_suppliers_per_bank(
 pub async fn delete_bank(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
     let result = sqlx::query!(
         r#"
-        DELETE FROM banks
-        WHERE bank_id = (
+        WITH top_bank AS (
             SELECT b.bank_id
             FROM banks b
             JOIN suppliers s ON s.bank_id = b.bank_id
             GROUP BY b.bank_id
-            ORDER BY COUNT(s.supplier_id) DESC
+            ORDER BY COUNT(*) DESC
             LIMIT 1
-        );
+        )
+        DELETE FROM banks
+        WHERE bank_id IN (SELECT bank_id FROM top_bank); 
         "#
     )
     .execute(&state.db)

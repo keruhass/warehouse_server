@@ -8,8 +8,11 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::{dto::service::AmountOfMoneyPerBank, state::AppState};
 use crate::{dto::service::MonthTurnover, errors::api::ApiError};
+use crate::{
+    dto::service::{AmountOfMoneyPerBank, CreateUnit},
+    state::AppState,
+};
 
 #[axum::debug_handler]
 pub async fn get_amount_of_money_per_bank(
@@ -95,4 +98,16 @@ pub async fn get_year_turnover(
     } else {
         Ok(Json(result))
     }
+}
+
+pub async fn post_unit(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateUnit>,
+) -> Result<StatusCode, ApiError> {
+    sqlx::query("INSERT INTO units (unit_name) VALUES ($1)")
+        .bind(payload.unit_name)
+        .execute(&state.db)
+        .await?;
+
+    Ok(StatusCode::CREATED)
 }
